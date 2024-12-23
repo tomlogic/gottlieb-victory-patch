@@ -1,0 +1,4 @@
+# Ignore original/patched ROM files
+*.CPU
+*.bin
+

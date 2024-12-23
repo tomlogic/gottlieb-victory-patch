@@ -26,6 +26,9 @@ with Python 3.  It will perform a simple checksum on the files before
 applying the patches to create `victory-v1.01-PROM1.bin` and
 `victory-v1.01-PROM2.bin`.
 
+The repository also includes IPS-formatted patch files as an alternate method
+of patching.
+
 ## ROM checksums
 
 | Setting           | Original  | v1.01      |

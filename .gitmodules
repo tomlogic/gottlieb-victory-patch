@@ -1,0 +1,3 @@
+[submodule "ips_util"]
+	path = ips_util
+	url = https://github.com/nleseul/ips_util.git

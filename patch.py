@@ -18,7 +18,7 @@ v1.01, Released 2024-12-23
 
 v1.02, unreleased
     - Upon race completion, don't modify flag used to enable checkpoint
-      hurry-up at start of ball.
+      hurry-up at start of other players' balls.
     - Track count of completed checkpoints, and base bonus on that value
       instead of just the current checkpoint number.
     - Race Bonus:
@@ -31,22 +31,52 @@ v1.03, custom INDISC 2025 version, released 2025-01-19
       if any).
 
 v1.04, public version of v1.03, released 2025-01-31
-    - No functional changes.
+    - No functional changes, just a public release of INDISC version.
+
+v1.1, released 2025-02-05
+    - Update code used to identify "player 1 ball 1" to free up 38 bytes.
+    - Optimize code used to load checkpoint bonus and hurry-up timeouts.
+    - Carry FINISH lamp progress (for multiplier) into next ball.
+    - Shorten labels used in Test Mode to free up more ROM space.
 """
 
 from ips_util.ips_util import Patch
 import os
 
 # Values for files created by this script.
-VERSION = '1.04'
-CHECKSUMS = [0xD0316, 0x329DF]
+VERSION = '1.1'
+CHECKSUMS = [0xCE78D, 0x3288D]
 
 # shortcuts for opcodes with unique mnemonics (e.g., not LDA which has multiple versions)
-NOP = b'\xEA'       # this notation allows for `NOP * 20` for 20 NOP opcodes
+
+# use b'\xXX' notation instead of 0xXX notation to allow for NOP * 20 or BRK * 20 notation
+NOP = b'\xEA'       # replace short runs of code to skip with NOP
+BRK = b'\x00'       # replace longer runs of code available for new functions
+
+BPL = 0x10
+BMI = 0x30
+BVC = 0x50
+BVS = 0x70
+BCC = 0x90
+BCS = 0xB0
+BNE = 0xD0
+BEQ = 0xF0
+
 JSR = 0x20
 RTS = 0x60
-TYA = 0x98
+
+PHA = 0x48
+PLA = 0x68
+
+TAX = 0xAA
+TXA = 0x8A
+DEX = 0xCA
+INX = 0xE8
+
 TAY = 0xA8
+TYA = 0x98
+DEY = 0x88
+INY = 0xC8
 
 # reference binary files in our directory
 my_dir = os.path.dirname(__file__)
@@ -89,13 +119,17 @@ def patch(data, offset, new_bytes):
         for b in new_bytes:
             data[offset + length] = b
             length += 1
+    elif isinstance(new_bytes, str):
+        for c in new_bytes:
+            data[offset + length] = ord(c)
+            length += 1
     elif isinstance(new_bytes, int):
         while new_bytes or length == 0:
             data[offset + length] = new_bytes & 0xFF
             length += 1
             new_bytes >>= 8
     else:
-        raise ValueError('unknown type passed to patch(): ' + type(new_bytes))
+        raise ValueError('unknown type passed to patch():', type(new_bytes))
     return length
 
 
@@ -176,7 +210,7 @@ def patch_rom(rom):
     132F : A9 8E		"  "		lda	#$8E         ; F14 [completed qualifying heat] set
     1331 : 20 CF 2F		"  /"		jsr	func_update_player_flag
     """
-    patch(rom, 0x1332, 0x2FCF)    # change function called from jsr
+    patch(rom, 0x1331, [JSR, 0x2FCF])    # change function called from jsr
 
     # replace code that loads the player's checkpoint with a JSR to this new code
     #   12C7 : 20 91 33         "  3"           jsr     load_player_num_to_X
@@ -240,7 +274,7 @@ def patch_rom(rom):
     patch_size = patch(rom, func_toggle_bonus_lamp, [
         0xA5, 0xE7,         # lda X00E7
         0x29, 0x07,         # and #$07
-        0xA8,               # tay
+        TAY,                # tay
         0xB9, 0x242D,       # lda tbl_checkpoint_lamps,y
         0x09, 0x40,         # ora #$40
         0x4C, 0x2F94        # jmp update_single_lamp_solenoid_from_A  ; chain into this function
@@ -274,7 +308,7 @@ def patch_rom(rom):
     ])
 
     # fix the bpl to the top of the bonus burndown loop
-    patch(rom, 0x1467, [0x10, 0xD0])
+    patch(rom, 0x1467, [BPL, 0xD0])
 
     # fix all func_award_bonus calls to use the new address
     for address in [0x3CA6, 0x3F07, 0x3F47]:
@@ -282,14 +316,175 @@ def patch_rom(rom):
 
     # **** end of patches to award_bonus()
 
-    # replace "TEST MODE" with "VCTRY 1,xx"
+    # **** start of code to remove func_update_player_flag_A_for_all() and free up 38 bytes
+
+    # no-op unnecessary initialization of variable at 0x11C
+    patch(rom, 0x3AF8, NOP * 3)
+
+    # delay incrementing var_not_start_of_game
+    patch(rom, 0x3B2B, NOP * 2)
+
+    # use var_not_start_of_game instead of player flag 13 to identify player 1, ball 1
+    patch(rom, 0x1559, [
+        0xA5, 0xE3,                 # lda     var_not_start_of_game
+        BNE, 0x156A - 0x155D,       # bne     .continue@156A
+        NOP, NOP, NOP,              # unused space
+    ])
+
+    # replace code that set F13 for all players to just increment var_not_start_of_game
+    # placing NOPs first, since there's potential to combine them with previous 3 NOPs
+    patch(rom, 0x1565, [
+        NOP, NOP, NOP,              # unused space
+        0xE6, 0xE3,                 # inc     var_not_start_of_game
+    ])
+
+    # Get rid of now-unused 38-byte func_update_player_flag_A_for_all()
+    patch(rom, 0x3008, BRK * 38)
+
+    # **** end of code to remove func_update_player_flag_A_for_all() and free up 38 bytes
+
+    # **** Always load checkpoint hurry-up with the bonus
+
+    # new location for func_load_checkpoint_hurryup_delay
+    func_load_checkpoint_hurryup_delay = 0x172F
+
+    # new function to load a value from 0 to 7 based on player's completed checkpoints
+    func_load_player_checkpoint_index_to_Y = 0x174C
+    patch(rom, func_load_player_checkpoint_index_to_Y, [
+        JSR, 0x3391,            # jsr load_player_num_to_X
+        0xB5, 0xED,             # lda var_player_checkpoint[],x
+        0xC9, 0x07,             # cmp #$07
+        BCC, 2,                 # skip over next instruction if < (<=?) 7
+        0xA9, 0x07,             # lda #$07
+        TAY,                    # tay
+        RTS                     # rts
+    ])
+
+    # update func_load_checkpoint_bonus
+    patch(rom, 0x1712, [
+        JSR, func_load_player_checkpoint_index_to_Y,    # jsr func_load_player_checkpoint_index_to_Y
+        0xA5, 0xDF,                                     # lda var_balls_per_game
+        0xC9, 0x03,                                     # cmp #$03
+        BNE, 5,                                         # bne .5ball_checkpoint_value
+        INY,                                            # iny
+        0x84, 0xF7,                                     # sty var_checkpoint_bonus_MSB
+        BNE, 15,                                        # bne func_load_checkpoint_hurryup_delay (always branches)
+        # .5ball_checkpoint_value:      ; (unmodified from original code)
+        0xB9, 0x246B,                                   # lda tbl_halved_checkpoint_values,y
+        PHA,                                            # pha
+        JSR, 0x272F,                                    # jsr A_shift_high_nibble_to_low
+        0x85, 0xF7,                                     # sta var_checkpoint_bonus_MSB
+        PLA,                                            # pla
+        JSR, 0x272A,                                    # jsr A_shift_low_nibble_to_high
+        0x85, 0xF8,                                     # sta var_checkpoint_bonus_LSB
+    ])
+
+    # update func_load_checkpoint_hurryup_delay (now just 9 bytes instead of 20)
+    patch(rom, func_load_checkpoint_hurryup_delay, [
+        JSR, func_load_player_checkpoint_index_to_Y,    # jsr func_load_player_checkpoint_index_to_Y
+        0xB9, 0x2473,                                   # lda tbl_checkpoint_hurryup_delay,y
+        0x85, 0xFD,                                     # sta var_checkpoint_hurryup_delay
+        RTS,                                            # rts
+        BRK * 20                                        # erase unused code
+    ])
+
+    # Remove calls to func_load_checkpoint_hurryup_delay after loading the bonus
+    for address in [0x12E0, 0x3B59]:
+        patch(rom, address, NOP * 3)
+
+    # Fix remaining call to func_load_checkpoint_hurryup_delay
+    patch(rom, 0x3CEA, [JSR, func_load_checkpoint_hurryup_delay])
+
+    # **** End of loading checkpoint hurry-up with the bonus
+
+    # **** Changes around FINISH targets -- carry status over from ball to ball
+
+    # new version of code to set FINISH lamps at start of ball, incorporate player flags check
+    func_initialize_FINISH_lamps = 0x3FDF
+    patch(rom, func_initialize_FINISH_lamps, [
+        0xA2, 0x05,                             # ldx #$05
+        # .loop:
+        0xBD, 0x2446,                           # lda tbl_FINISH_lamps[], x
+        JSR, 0x307B,                            # jsr func_check_player_flag_A
+        0xBD, 0x2427,                           # lda tbl_alternating_FINISH_lamps[],x
+        BCC, 2,                                 # bcc .skip_or
+        0x09, 0x80,                             # ora #$80          ; lamp always lit if previously scored
+        # .skip_or:
+        JSR, 0x2F94,                            # jsr update_single_lamp_solenoid_from_A
+        DEX,                                    # dex
+        BPL, (-19 & 0xFF),                      # bpl .loop
+        RTS                                     # rts
+    ])
+
+    # update calls to that function
+    for address in [0x3B74]:
+        patch(rom, address, [JSR, func_initialize_FINISH_lamps])
+
+    # replace existing code with a call to clear the player flags and then display the lamps
+    patch(rom, 0x3EA4, [
+        JSR, 0x3EAF,                            # jsr
+        0x4C, func_initialize_FINISH_lamps,     # jmp func_initialize_FINISH_lamps
+        NOP * 5                                 # erase remaining unused code
+    ])
+
+    # set/initialize the player flags once at the start of each player's game
+    patch(rom, 0x3B59, [JSR, 0x3EAF])
+
+    # **** End FINISH changes
+
+    # Shorten up test menu text to make more room for game/version
+    # and future strings or code.
+    labels = [
+        'LEFT COINS',
+        'RIGHT COINS',
+        'CENTER COINS',
+        'PLAYS',
+        'REPLAYS',
+        'REPLAY PCT',
+        'EXTRA BALLS',
+        'TILTS',
+        'SPECIALS',
+        'HGTD AWARDS',
+        '1ST HIGH SCORE',
+        '2ND HIGH SCORE',
+        '3RD HIGH SCORE',
+        'HGTD',
+        'AVG PLAY TIME',
+        'LAMP TEST',
+        'RELAY+SOLENOID TEST',
+        'SWITCH TEST',
+        'DIP SWITCHES',
+        'DISPLAY TEST',
+        'MEMORY TEST'
+    ]
+    address = 0x224A            # end of strings before MSB/LSB table
+    index = len(labels)
+    labels.reverse()
+    for label in labels:
+        str_len = len(label) + 1
+        address -= str_len
+        # next line useful for updating SYM files
+        # print("string 0x%04X\tstr_%-21s %u" % (address, label.replace(' ', '_'), str_len))
+
+        patch(rom, address, [label, 0xFF])
+        # update MSB/LSB of new label
+        index -= 1
+        patch(rom, 0x225F + index, (address >> 8))
+        patch(rom, 0x224A + index, (address & 0xFF))
+
+    # replace "TEST MODE" with "VICTORY v1,x"
     (major, minor) = VERSION.split('.')
-    patch(rom, 0x20E8, [
-        b"VCTRY ",
+    unused = 0x20E8 + patch(rom, 0x20E8, [
+        b"VICTORY V",
         0x80 | ord(major),                  # set top bit for comma
         str.encode(minor.replace('0', 'O')),
         0xFF
     ])
+
+    # replace unused bytes with BRK (0x00)
+    str_len = address - unused
+    patch(rom, unused, BRK * str_len)
+    # print("string 0x%04X\tstr_%-21s %u" % (unused, 'UNUSED', str_len))
 
     # update PROM2 and PROM1 checksums stored on PROM1
 

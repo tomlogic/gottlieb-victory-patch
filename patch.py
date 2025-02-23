@@ -40,7 +40,6 @@ v1.1, released 2025-02-05
     - Shorten labels used in Test Mode to free up more ROM space.
 """
 
-from ips_util.ips_util import Patch
 import os
 
 # Values for files created by this script.
@@ -519,10 +518,17 @@ prom_patched = [
     ROM[0x1000:0x1800]
 ]
 
+try:
+    from ips_util.ips_util import Patch
+except ImportError:
+    Patch = None
+    print("Note: install ips_util to create .ips patch files.")
+    pass
+
 for i in range(0, 2):
     basename = 'victory-v%s-PROM%u' % (VERSION, i + 1)
     save('%s.bin' % basename, prom_patched[i], CHECKSUMS[i])
-    # Generate IPS file
-    patch = Patch.create(prom[i], prom_patched[i])
-    with open(os.path.join(my_dir, '%s.ips' % basename), 'wb') as ips:
-        ips.write(patch.encode())
+    if Patch:
+        # Generate IPS file
+        with open(os.path.join(my_dir, '%s.ips' % basename), 'wb') as ips:
+            ips.write(Patch.create(prom[i], prom_patched[i]).encode())

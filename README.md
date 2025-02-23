@@ -22,6 +22,10 @@ Starting with v1.1, FINISH target progress carries over from ball to ball,
 providing more incentive for attempting those risky shots and increasing the
 multiplier.
 
+Version 1.2 changed behavior of DIP switch 30 to FREE PLAY when ON (instead
+of adding 9 credits for each coin in the 3rd coin chute).  Note that PROM2
+v1.2 is identical to v1.1.
+
 ## Creating patched ROMs
 
 Because of Gottlieb's copyright enforcement, this repository doesn't include
@@ -44,13 +48,13 @@ applying the patches to create `victory-vX.X-PROM1.bin` and
 
 ## ROM checksums
 
-| Setting           | Original  | v1.1        |
+| Setting           | Original  | v1.2        |
 |-------------------|-----------|-------------|
 | PROM1 file size   | 8192      | 8192        |
-| PROM1 checksum    | 0xD02F2   | 0xCE78D     |
-| PROM1 CRC32       | e724db90  | 526787e5    |
+| PROM1 checksum    | 0xD02F2   | 0xCBC2F     |
+| PROM1 CRC32       | e724db90  | 0c24e956    |
 | PROM2 file size   | 2048      | 2048        |
 | PROM2 checksum    | 0x32B32   | 0x3288D     |
 | PROM2 CRC32       | 6a42eaf4  | fbcd3463    |
-| Service Menu text | TEST MODE | VICTORY 1,1 |
-| in-game check-sum | 02F2      | E78D        |
+| Service Menu text | TEST MODE | VICTORY 1,2 |
+| in-game check-sum | 02F2      | BC2F        |

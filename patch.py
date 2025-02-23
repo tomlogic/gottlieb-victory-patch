@@ -38,13 +38,18 @@ v1.1, released 2025-02-05
     - Optimize code used to load checkpoint bonus and hurry-up timeouts.
     - Carry FINISH lamp progress (for multiplier) into next ball.
     - Shorten labels used in Test Mode to free up more ROM space.
+
+v1.2, released 2024-02-22
+    - Free up more space by consolidating switch handler table.
+    - Change behavior of DIP switch 30 to FREE PLAY when ON (instead of
+      adding 9 credits for each coin in the 3rd coin chute).
 """
 
 import os
 
 # Values for files created by this script.
-VERSION = '1.1'
-CHECKSUMS = [0xCE78D, 0x3288D]
+VERSION = '1.2'
+CHECKSUMS = [0xCBC2F, 0x3288D]
 
 # shortcuts for opcodes with unique mnemonics (e.g., not LDA which has multiple versions)
 
@@ -471,6 +476,31 @@ def patch_rom(rom):
         patch(rom, 0x225F + index, (address >> 8))
         patch(rom, 0x224A + index, (address & 0xFF))
 
+    # **** Combine switch handler tables for rows 0 to 3.
+
+    switch_handler_table_MSB = 0x2048
+    switch_handler_table_LSB = 0x2040
+    tbl_switch_row_3_handlers = 0x23D7      # sw30_handler followed by six 0xFFFF handlers
+    tbl_switch_row_X_handlers = 0x23D9      # all 0xFFFF address handlers
+    tbl_start_address = 0x23AF
+
+    # combine row for 3 (single handler for sw30) with rows 0-2 (7 unused handlers of 0xFFFF)
+    patch(rom, tbl_switch_row_3_handlers, [0x115D, [0xFFFF] * 7])
+
+    # update pointers for rows 0 to 2
+    for i in range(0, 3):
+        patch(rom, switch_handler_table_MSB + i, tbl_switch_row_X_handlers >> 8)
+        patch(rom, switch_handler_table_LSB + i, tbl_switch_row_X_handlers & 0xFF)
+
+    # upgrade pointer for row 3
+    patch(rom, switch_handler_table_MSB + 3, tbl_switch_row_3_handlers >> 8)
+    patch(rom, switch_handler_table_LSB + 3, tbl_switch_row_3_handlers & 0xFF)
+
+    # remove old entries
+    patch(rom, tbl_start_address, BRK * (tbl_switch_row_3_handlers - tbl_start_address))
+
+    # **** End of switch handler table changes.
+
     # replace "TEST MODE" with "VICTORY v1,x"
     (major, minor) = VERSION.split('.')
     unused = 0x20E8 + patch(rom, 0x20E8, [
@@ -484,6 +514,32 @@ def patch_rom(rom):
     str_len = address - unused
     patch(rom, unused, BRK * str_len)
     # print("string 0x%04X\tstr_%-21s %u" % (unused, 'UNUSED', str_len))
+
+    # --------- Start of Free Play patch using dipswitch 30
+
+    # Replace existing DIP switch 30 code (which added 9 credits to 3rd coin chute)
+    sub_check_dipsw30_freeplay = 0x35A1
+    # interrupt the code that updates var_credits_bcd with our freeplay check
+    patch(rom, 0x2C10, [0x4C, sub_check_dipsw30_freeplay])
+    patch(rom, 0x359D, [
+        0x4C, 0x35B7,               # jmp     .save_pricing_config
+        BRK,                        # brk     ; wrap this new code with BRK, so it stands out
+        # sub_check_dipsw30_freeplay:
+        0xA9, 0x04,                 # lda     #$04
+        0x24, 0xD7,                 # bit     var_dipsw_25_32
+        BNE, 6,                     # bne     .free_play
+        # code overwritten by JMP at 0x2C10
+        0x84, 0xBF,                 # sty     var_credits_bcd
+        TYA,                        # tya
+        0x4C, 0x2C13,               # jmp     .update_credits       ; resume non-freeplay code
+        # .free_play:
+        0x85, 0xBF,                 # sta     var_credits_bcd     ; always 4 credits
+        # it probably isn't necessary to update the display -- it should still be blank
+        0xA9, '-',                  # lda     #$20    ; ' '
+        0x85, 0x1E,                 # sta     disp_credits_ones
+        0x4C, 0x2C25,               # jmp     .credits_updated
+        BRK                         # brk     ; wrap this new code with BRK, so it stands out
+    ])
 
     # update PROM2 and PROM1 checksums stored on PROM1
 

@@ -43,13 +43,19 @@ v1.2, released 2024-02-22
     - Free up more space by consolidating switch handler table.
     - Change behavior of DIP switch 30 to FREE PLAY when ON (instead of
       adding 9 credits for each coin in the 3rd coin chute).
+
+v1.3,
+    - Use DIP switch 32 to enable "conservative" drop target feature.
+      When enabled, completing drop target bank on any letter other than
+      a lit "L" will delay the reset until the player shoots either the
+      upper ramp or the right orbit (checkpoint 3).
 """
 
 import os
 
 # Values for files created by this script.
-VERSION = '1.2'
-CHECKSUMS = [0xCBC2F, 0x3288D]
+VERSION = '1.3'
+CHECKSUMS = [0xCCE47, 0x32825]
 
 # shortcuts for opcodes with unique mnemonics (e.g., not LDA which has multiple versions)
 
@@ -114,6 +120,8 @@ def save(file_out, data, expected_checksum):
               (file_out, actual_checksum, expected_checksum))
 
 
+unused_space = set()
+
 def patch(data, offset, new_bytes):
     length = 0
     if isinstance(new_bytes, list):
@@ -134,7 +142,48 @@ def patch(data, offset, new_bytes):
             new_bytes >>= 8
     else:
         raise ValueError('unknown type passed to patch():', type(new_bytes))
+
+    global unused_space
+    unused_space -= set(range(offset, offset + length))
+
     return length
+
+
+def erase(data, offset, length):
+    """
+    Replace code with BRK bytes, and keep range in a list of available space
+    for future patches.
+    """
+
+    for i in range(length):
+        data[offset + i] = ord(BRK)
+
+    global unused_space
+    unused_space |= set(range(offset, offset + length))
+
+
+def report_unused():
+    """
+    Print report on unused/erase ROM space.  Go through the addresses in
+    <unused_space> and convert to ranges.
+    """
+    # convert set to list so we can sort it
+    global unused_space
+    start = None
+    last = None
+    addresses = list(unused_space)
+    addresses.sort()
+    for address in addresses:
+        if last is None or address != last + 1:
+            # new range
+            if start:
+                print("Unused: 0x%04X to 0x%04X (%u bytes)" %
+                      (start, last, last - start + 1))
+            start = address
+        last = address
+
+    print("Unused: 0x%04X to 0x%04X (%u bytes)" %
+          (start, last, last - start + 1))
 
 
 def checksum(data):
@@ -145,6 +194,10 @@ def checksum(data):
     
     
 def patch_rom(rom):
+    # Mark unused space at end of each ROM as available for future code
+    erase(rom, 0x3FDF, 0x3FF6 - 0x3FDF)
+    erase(rom, 0x17E3, 0x1800 - 0x17E3)
+
     # Get rid of all of this code from completing a race.  One player's action shouldn't
     # impact other players' games.
     """
@@ -171,7 +224,7 @@ def patch_rom(rom):
         JSR, 0x11A6,            # jsr func_add_multiplied_to_score
 
         0xA9, 0x08,             # lda #$08      ; disable multiplied score
-        JSR, 0x2FCF,            # func_update_player_flag
+        JSR, 0x2FCF,            # jsr func_update_player_flag
 
         NOP * 5                 # room for even more code!
     ])
@@ -228,7 +281,7 @@ def patch_rom(rom):
         ])
 
     """
-    Update func_is_player_at_checkpoint_Y, but first simplifying previous routine
+    Update func_is_player_at_checkpoint_Y, by first simplifying previous routine
     (.mult_at_max_8X_so_score_mult_100K@1254) to jump to existing code (freeing up
     some extra bytes).
     """
@@ -343,7 +396,7 @@ def patch_rom(rom):
     ])
 
     # Get rid of now-unused 38-byte func_update_player_flag_A_for_all()
-    patch(rom, 0x3008, BRK * 38)
+    erase(rom, 0x3008, 38)
 
     # **** end of code to remove func_update_player_flag_A_for_all() and free up 38 bytes
 
@@ -384,12 +437,12 @@ def patch_rom(rom):
     ])
 
     # update func_load_checkpoint_hurryup_delay (now just 9 bytes instead of 20)
+    erase(rom, func_load_checkpoint_hurryup_delay, 29)
     patch(rom, func_load_checkpoint_hurryup_delay, [
         JSR, func_load_player_checkpoint_index_to_Y,    # jsr func_load_player_checkpoint_index_to_Y
         0xB9, 0x2473,                                   # lda tbl_checkpoint_hurryup_delay,y
         0x85, 0xFD,                                     # sta var_checkpoint_hurryup_delay
         RTS,                                            # rts
-        BRK * 20                                        # erase unused code
     ])
 
     # Remove calls to func_load_checkpoint_hurryup_delay after loading the bonus
@@ -497,7 +550,7 @@ def patch_rom(rom):
     patch(rom, switch_handler_table_LSB + 3, tbl_switch_row_3_handlers & 0xFF)
 
     # remove old entries
-    patch(rom, tbl_start_address, BRK * (tbl_switch_row_3_handlers - tbl_start_address))
+    erase(rom, tbl_start_address, tbl_switch_row_3_handlers - tbl_start_address)
 
     # **** End of switch handler table changes.
 
@@ -510,10 +563,8 @@ def patch_rom(rom):
         0xFF
     ])
 
-    # replace unused bytes with BRK (0x00)
-    str_len = address - unused
-    patch(rom, unused, BRK * str_len)
-    # print("string 0x%04X\tstr_%-21s %u" % (unused, 'UNUSED', str_len))
+    # replace unused bytes in string table with BRK (0x00)
+    erase(rom, unused, address - unused)
 
     # --------- Start of Free Play patch using dipswitch 30
 
@@ -540,6 +591,69 @@ def patch_rom(rom):
         0x4C, 0x2C25,               # jmp     .credits_updated
         BRK                         # brk     ; wrap this new code with BRK, so it stands out
     ])
+
+    """
+    Start of drop target patch for v1.3.
+    - When DIP switch 32 set to conservative, delay automatic drop target
+      reset upon completion until player shoots upper ramp/orbit to leave
+      upper playfield.  Exception for hitting final lit target (L).
+    """
+
+    # Move code from 3DDE to new function func_reset_FUEL_drops_if_any_down().
+    # Note that we can share the `jmp func_reset_FUEL_drops` with _all_down().
+    func_reset_FUEL_drops_if_any_down = 0x3008
+    patch_length = patch(rom, func_reset_FUEL_drops_if_any_down, [
+        0xA0, 0x00,                 # ldy     #$00         ; F0 clear [(F)UEL drop]
+        0xA2, 0x04,                 # ldx     #$04
+        JSR, 0x3083,                # jsr     func_check_X_player_flags_from_Y
+        BCC, 11,                    # bcc     jmp_func_reset_FUEL_drops
+        RTS
+    ])
+
+    # relocate existing func_reset_FUEL_drops_if_all_down()
+    func_reset_FUEL_drops_if_all_down = func_reset_FUEL_drops_if_any_down + patch_length
+    patch_length = patch(rom, func_reset_FUEL_drops_if_all_down, [
+        0xA0, 0x80,                 # ldy     #$80         ; F0 set [(F)UEL drop]
+        0xA2, 0x04,                 # ldx     #$04
+        JSR, 0x3083,                # jsr     func_check_X_player_flags_from_Y
+        BCS, 1,                     # bcs     jmp_func_reset_FUEL_drops
+        RTS,
+        0x4C, 0x116E,               # jmp     func_reset_FUEL_drops
+    ])
+    func_FUEL_reset_if_conservative = func_reset_FUEL_drops_if_all_down + patch_length
+
+    # call func_reset_FUEL_drops_if_any_down() from its original location
+    patch(rom, 0x3DDE, [
+        NOP * 9,                    # room to check DIP switch 32 if we choose to
+        JSR, func_reset_FUEL_drops_if_any_down,
+    ])
+
+    # Replace existing code at 3DA5 to only jump to func_reset_FUEL_drops_if_all_down()
+    # when DIP SW32 is set to LIBERAL.
+    patch(rom, 0x3DA5, [
+        NOP, NOP, NOP,              # unused space
+        0xA5, 0xD7,                 # lda     var_dipsw_25_32
+        0x29, 0x01,                 # and     #$01
+        BEQ, 3,                     # BEQ: CONSERVATIVE, BNE: LIBERAL
+        0x4C, func_reset_FUEL_drops_if_all_down     # jmp func_reset_FUEL_drops_if_all_down()
+    ])
+
+    # Create new function func_FUEL_reset_if_conservative()
+    # - Calls func_add_multiplied_to_score() (so we can replace calls to that function).
+    # - calls func_reset_FUEL_drops_if_any_down() if DIP SW32 is set to conservative.
+    patch(rom, func_FUEL_reset_if_conservative, [
+        JSR, 0x11A6,                # jsr     func_add_multiplied_to_score
+        0xA5, 0xD7,                 # lda     var_dipsw_25_32
+        0x29, 0x01,                 # and     #$01
+        BNE, 3,                     # BEQ: CONSERVATIVE, BNE: LIBERAL
+        0x4C, func_reset_FUEL_drops_if_any_down,    # jmp func_reset_FUEL_drops_if_any_down
+        RTS
+    ])
+    # Replace scoring handlers in sw44 and sw73 handler with JSR to func_FUEL_reset_if_conservative().
+    for address in [0x3EBE, 0x114D]:
+        patch(rom, address, [JSR, func_FUEL_reset_if_conservative])
+
+    #### End of Drop Target patch from v1.3
 
     # update PROM2 and PROM1 checksums stored on PROM1
 
@@ -568,6 +682,7 @@ ROM[0x2000:0x4000] = prom[0]
 ROM[0x1000:0x1800] = prom[1]
 
 patch_rom(ROM)
+report_unused()
 
 prom_patched = [
     ROM[0x2000:0x4000],
